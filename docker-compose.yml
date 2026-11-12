@@ -1,0 +1,90 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: cfr-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-cfr_admin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-cfr_secure_password_change_me}
+      POSTGRES_DB: ${POSTGRES_DB:-cfr_asset_backup}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-cfr_admin} -d ${POSTGRES_DB:-cfr_asset_backup}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  restic-server:
+    image: restic/rest-server:latest
+    container_name: cfr-restic-server
+    restart: unless-stopped
+    environment:
+      # Append-only mode ensures lab endpoints cannot delete or overwrite historical GMP snapshots
+      OPTIONS: "--append-only --no-auth --prometheus"
+    ports:
+      - "8000:8000"
+    volumes:
+      - restic_rest_data:/data
+
+  minio:
+    image: elestio/minio:latest
+    container_name: cfr-minio-s3
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin_secret_change_me}
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_s3_data:/data
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: cfr-backend
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      restic-server:
+        condition: service_started
+      minio:
+        condition: service_started
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql://cfr_admin:cfr_secure_password_change_me@db:5432/cfr_asset_backup}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-cfr-part11-jwt-secret-key-change-in-prod}
+      MASTER_ENCRYPTION_KEY: ${MASTER_ENCRYPTION_KEY:-}
+      RESTIC_REST_SERVER_URL: ${RESTIC_REST_SERVER_URL:-http://restic-server:8000}
+      RESTIC_DEFAULT_REPO_PASSWORD: ${RESTIC_DEFAULT_REPO_PASSWORD:-gmp-restic-repo-default-password}
+      MINIO_ENDPOINT: ${MINIO_ENDPOINT:-http://minio:9000}
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin_secret_change_me}
+      PUBLIC_API_URL: ${PUBLIC_API_URL:-http://localhost:8080/api/v1}
+      DATA_DIR: /app/data
+      DOCS_DIR: /app/docs
+    ports:
+      - "8001:8001"
+    volumes:
+      - backend_data:/app/data
+      - ./docs:/app/docs:ro
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: cfr-frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "8080:80"
+
+volumes:
+  postgres_data:
+  restic_rest_data:
+  minio_s3_data:
+  backend_data:
